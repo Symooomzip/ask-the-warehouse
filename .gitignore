@@ -1,0 +1,25 @@
+# local learning notes and debriefs (for the author, not the public repo)
+notes/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# heavy artifacts: models, checkpoints, raw datasets
+models/
+checkpoints/
+data/raw/
+*.safetensors
+*.gguf
+*.onnx
+*.bin
+
+# node
+node_modules/
+web/dist/
+
+# secrets
+.env
+.env.*
