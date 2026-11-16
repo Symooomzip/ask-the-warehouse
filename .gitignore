@@ -23,3 +23,7 @@ web/dist/
 # secrets
 .env
 .env.*
+
+# generated artifacts and logs
+warehouse/*.db
+web/spike/serve.log

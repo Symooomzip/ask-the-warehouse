@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feasibility spike - in-browser text-to-SQL</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; background: #0e1116; color: #e6e9ee; margin: 0; padding: 20px; max-width: 880px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub, div.sub { color: #9aa4b2; margin: 0 0 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+  label { color: #9aa4b2; font-size: 13px; }
+  select, button, textarea { background: #171c24; color: inherit; border: 1px solid #2b3340; border-radius: 6px; padding: 8px 10px; font: inherit; }
+  button { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: #2563eb; border-color: #2563eb; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 150px; font: 13px/1.45 ui-monospace, Consolas, monospace; }
+  pre { background: #11151b; border: 1px solid #2b3340; border-radius: 6px; padding: 12px; overflow: auto; font: 13px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 12px 0; }
+  .card { background: #11151b; border: 1px solid #2b3340; border-radius: 6px; padding: 10px; }
+  .card b { display: block; font-size: 20px; } .card span { color: #9aa4b2; font-size: 12px; }
+  progress { width: 100%; }
+</style>
+</head>
+<body>
+<h1>Feasibility spike: text-to-SQL in the browser</h1>
+<p class="sub">Measures real load time and generation speed. Nothing is sent anywhere except the model download from huggingface.co.</p>
+
+<div class="row">
+  <label>Model
+    <select id="model">
+      <option value="onnx-community/Qwen2.5-Coder-0.5B-Instruct">Qwen2.5-Coder-0.5B-Instruct</option>
+      <option value="HuggingFaceTB/SmolLM2-360M-Instruct">SmolLM2-360M-Instruct</option>
+    </select>
+  </label>
+  <label>Device
+    <select id="device"></select>
+  </label>
+  <label>Precision
+    <select id="dtype">
+      <option value="q4">q4</option>
+      <option value="q4f16">q4f16</option>
+      <option value="int8">int8</option>
+      <option value="fp16">fp16</option>
+    </select>
+  </label>
+  <button id="load" class="primary">Load model</button>
+  <button id="run" disabled>Generate</button>
+</div>
+<progress id="bar" value="0" max="100" hidden></progress>
+<div id="status" class="sub"></div>
+
+<label for="prompt">Prompt (schema and question)</label>
+<textarea id="prompt"></textarea>
+
+<div class="grid">
+  <div class="card"><b id="m-load">-</b><span>load time (s)</span></div>
+  <div class="card"><b id="m-ttft">-</b><span>time to first token (s)</span></div>
+  <div class="card"><b id="m-tps">-</b><span>decode speed (tokens/s)</span></div>
+  <div class="card"><b id="m-tok">-</b><span>tokens generated</span></div>
+</div>
+
+<pre id="out"></pre>
+<div class="row"><button id="copy">Copy results as JSON</button></div>
+<pre id="env"></pre>
+
+<script type="module">
+import { AutoTokenizer, AutoModelForCausalLM, TextStreamer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2";
+
+const $ = (id) => document.getElementById(id);
+const SCHEMA = `You translate questions into SQLite queries. Answer with the SQL only.
+
+Tables:
+dim_customer(customer_id, name, city, segment)
+dim_product(product_id, name, category, unit_price)
+dim_date(date_id, date, year, month)
+fact_sales(sale_id, customer_id, product_id, date_id, quantity, amount)`;
+const QUESTION = "Top 5 customers by total sales amount in 2025, with their city.";
+$("prompt").value = `${SCHEMA}\n\nQuestion: ${QUESTION}`;
+
+const hasGpu = !!navigator.gpu;
+for (const d of hasGpu ? ["webgpu", "wasm"] : ["wasm"]) $("device").add(new Option(d, d));
+env.allowLocalModels = false;
+
+let tokenizer = null, model = null, loadSeconds = null, last = null, envData = {};
+const setStatus = (t) => ($("status").textContent = t);
+
+async function envInfo() {
+  let gpu = null;
+  if (hasGpu) {
+    try {
+      const a = await navigator.gpu.requestAdapter();
+      const i = a && (a.info || (await a.requestAdapterInfo?.()));
+      gpu = i ? `${i.vendor} ${i.architecture} ${i.description || ""}`.trim() : "adapter unavailable";
+    } catch { gpu = "error"; }
+  }
+  return {
+    userAgent: navigator.userAgent, cores: navigator.hardwareConcurrency, deviceMemoryGB: navigator.deviceMemory ?? "n/a",
+    webgpu: hasGpu, gpu, crossOriginIsolated: self.crossOriginIsolated, transformersJs: "4.3.2",
+  };
+}
+envInfo().then((e) => { envData = e; $("env").textContent = JSON.stringify(e, null, 2); });
+
+$("load").onclick = async () => {
+  $("load").disabled = true; $("run").disabled = true; $("bar").hidden = false; $("bar").value = 0;
+  const id = $("model").value, device = $("device").value, dtype = $("dtype").value;
+  try {
+    setStatus(`Loading ${id} (${device}, ${dtype}) ...`);
+    const t0 = performance.now();
+    tokenizer = await AutoTokenizer.from_pretrained(id);
+    model = await AutoModelForCausalLM.from_pretrained(id, {
+      device, dtype,
+      progress_callback: (p) => {
+        if (p.status === "progress" && p.total) {
+          $("bar").value = p.progress;
+          setStatus(`Downloading ${p.file} ${Math.round(p.loaded / 1e6)} / ${Math.round(p.total / 1e6)} MB`);
+        }
+      },
+    });
+    loadSeconds = (performance.now() - t0) / 1000;
+    $("m-load").textContent = loadSeconds.toFixed(1);
+    setStatus(`Loaded in ${loadSeconds.toFixed(1)} s (includes download; reload the page and load again to measure from cache).`);
+    $("run").disabled = false;
+  } catch (e) {
+    setStatus("Load failed: " + (e && e.message ? e.message : e)); console.error(e);
+  } finally { $("load").disabled = false; $("bar").hidden = true; }
+};
+
+$("run").onclick = async () => {
+  $("run").disabled = true; $("out").textContent = "";
+  try {
+    const messages = [{ role: "user", content: $("prompt").value }];
+    const inputs = tokenizer.apply_chat_template(messages, { add_generation_prompt: true, return_dict: true });
+    const promptTokens = inputs.input_ids.dims.at(-1);
+    let count = 0, tFirst = null, text = "";
+    const t0 = performance.now();
+    const streamer = new TextStreamer(tokenizer, {
+      skip_prompt: true,
+      callback_function: (s) => { text += s; $("out").textContent = text; },
+      token_callback_function: () => { if (tFirst === null) tFirst = performance.now(); count++; },
+    });
+    await model.generate({ ...inputs, max_new_tokens: 160, do_sample: false, streamer });
+    const t1 = performance.now();
+    const ttft = tFirst ? (tFirst - t0) / 1000 : null;
+    const tps = tFirst && count > 1 ? (count - 1) / ((t1 - tFirst) / 1000) : null;
+    $("m-ttft").textContent = ttft ? ttft.toFixed(2) : "-";
+    $("m-tps").textContent = tps ? tps.toFixed(1) : "-";
+    $("m-tok").textContent = count;
+    last = { model: $("model").value, device: $("device").value, dtype: $("dtype").value, loadSeconds, promptTokens, generatedTokens: count, ttftSeconds: ttft, tokensPerSecond: tps, output: text, env: envData };
+    setStatus("Done.");
+  } catch (e) { setStatus("Generation failed: " + (e && e.message ? e.message : e)); console.error(e); }
+  finally { $("run").disabled = false; }
+};
+
+$("copy").onclick = async () => { if (!last) return; await navigator.clipboard.writeText(JSON.stringify(last, null, 2)); setStatus("Results copied to clipboard."); };
+</script>
+</body>
+</html>
