@@ -1,6 +1,6 @@
 # Ask the Warehouse
 
-A small language model, fine-tuned with LoRA, that turns a question in English or French into a SQLite query. The query runs entirely in the browser on a fictional sales data warehouse, and the result is shown as a table and a chart. There is no server to pay for and no data leaves the visitor's machine.
+A small language model, fine-tuned with LoRA, that turns a question in English or French into a SQLite query. The model is served from a small cloud function, and the generated query runs entirely in the browser on a fictional sales data warehouse; the result is shown as a table and a chart. The visitor downloads no model, and no warehouse data ever leaves their machine.
 
 **Status: work in progress.** Phase 0 (scope and feasibility) is complete. Nothing in this repository reports a number that has not been measured; results are added here as each phase finishes, including the ones that are unflattering.
 
@@ -8,23 +8,25 @@ A small language model, fine-tuned with LoRA, that turns a question in English o
 
 - **Model:** a small open code model (Qwen2.5-Coder-0.5B-Instruct is the current candidate, Apache-2.0), fine-tuned with LoRA on filtered public text-to-SQL data plus French questions, and compared against the untouched base model and a few-shot prompting baseline.
 - **Evaluation:** execution accuracy (does the query return the same rows as the reference query), measured on a public dev set and on 40 or more hand-written questions over the fictional warehouse. Splits are made by schema, not by row, to avoid leakage.
-- **Demo:** a static web page. Recorded runs play back by default; live generation in the browser is an explicit choice, because the model download is several hundred megabytes. Generated SQL is checked by a read-only guard before it runs.
+- **Demo:** a static web page. Recorded runs play back by default and work offline; live generation is an explicit choice that calls the hosted model, with per-visitor and global daily quotas that keep it inside a free or near-free budget. Generated SQL is checked by a read-only guard before it runs.
+- **Hosting:** the quantized model runs in a container on AWS Lambda behind a streaming function URL (the model is never published for download); the web page is static. Cost controls (quotas, a kill switch, a budget alarm) are part of the design, not an afterthought.
 
 ## How it fits together
 
 ```
-question (EN / FR) + schema
-        |
-        v
-  small LLM + LoRA  --->  SQLite query
-  (WebGPU, in browser)        |
-                              v
-                     SQL guard (single SELECT, row and time limits)
-                              |
-                              v
-                SQLite in WebAssembly  --->  table + chart
-                 (fictional star schema)
+ browser                                    cloud
+ -------                                    -----
+ question (EN / FR) + schema  ---------->   small LLM + LoRA (llama.cpp, quantized)
+                                                    |
+ SQL guard  <----------  streamed SQL  <-----------+
+ (single SELECT, row and time limits)
+      |
+      v
+ SQLite in WebAssembly  --->  table + chart
+ (fictional star schema, never leaves the browser)
 ```
+
+The model only ever sees the question and the table definitions. The fictional data and the query results stay in the browser.
 
 ## Repository layout
 
@@ -60,9 +62,9 @@ Not yet measured: CPU-only (WASM) speed, phones, cached loading. Details and cav
 | 3 | Baselines and evaluation harness | Planned |
 | 4 | LoRA fine-tuning | Planned |
 | 5 | Evaluation and error analysis | Planned |
-| 6 | Export, quantization, inference | Planned |
-| 7 | SQL guard and web demo | Planned |
-| 8 | Deployment and documentation | Planned |
+| 6 | Export to GGUF, quantization, local inference check | Planned |
+| 7 | SQL guard and web demo (recorded runs, query anatomy, compare mode) | Planned |
+| 8 | Hosted model on AWS Lambda, cost guardrails, deployment and documentation | Planned |
 
 ## Running what exists
 

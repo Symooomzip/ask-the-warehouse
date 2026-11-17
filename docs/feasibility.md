@@ -56,5 +56,5 @@ The ONNX conversion of Qwen has no license field on its card; the license of the
 
 1. Dialect: SQLite.
 2. Base model: Qwen2.5-Coder-0.5B-Instruct; SmolLM2-360M kept as a lighter fallback.
-3. Demo: recorded runs by default, opt-in live mode with the download size shown, WebGPU only until CPU speed is measured.
+3. Demo (revised 2026-11-17): recorded runs by default; live generation served from a container on AWS Lambda so the visitor downloads nothing and any device works. In-browser inference stays an optional experiment, since it works (about 40 tokens/s on WebGPU) but needs a download of 555 MB or more and WebGPU. The SQL itself is always executed in the browser, so the data never leaves it.
 4. Data: SELECT or WITH examples that run in SQLite and return rows.
